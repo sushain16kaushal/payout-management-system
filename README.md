@@ -102,6 +102,73 @@ erDiagram
 - **`Sale.advancePaid` (boolean) + `Sale.status`** together drive all idempotency checks.
 
 See `prisma/schema.prisma` for full details.
+## Sequence Diagram — Advance Payout Flow
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant Ctrl as Controller
+  participant Svc as AdvancePayoutService
+  participant DB as PostgreSQL
+
+  C->>Ctrl: POST /api/payouts/advance/run
+  Ctrl->>Svc: runAdvancePayoutJob(userId?)
+  Svc->>DB: findMany WHERE status=PENDING AND advancePaid=false
+  DB-->>Svc: eligible sale IDs
+
+  loop for each sale (sequential)
+    Svc->>DB: BEGIN TRANSACTION
+    Svc->>DB: SELECT ... FOR UPDATE (lock row)
+    Svc->>Svc: re-check: still PENDING + not paid?
+    alt eligible
+      Svc->>DB: UPDATE Sale SET advancePaid=true
+      Svc->>DB: INSERT PayoutTransaction (ADVANCE)
+      Svc->>DB: UPDATE User walletBalance += amount
+      Svc->>DB: COMMIT
+    else already processed
+      Svc->>DB: ROLLBACK (no-op)
+    end
+  end
+
+  Svc-->>Ctrl: summary (processed, skipped, total)
+  Ctrl-->>C: 200 JSON response
+```
+
+The reconciliation and withdrawal flows follow the same lock → re-check → commit pattern, scoped to `Sale` and `User` rows respectively.
+
+## Class / Module Design
+
+The project uses ES modules instead of JS classes, with each service exposing a focused set of functions — the functional equivalent of a class's public methods. Internal state (the DB connection) is a shared singleton rather than instance state, since there's exactly one of it per process.
+
+| Module | Responsibility | Public Methods |
+|---|---|---|
+| `sale.service.js` | Sale lifecycle | `createSale()`, `listSales()`, `getSaleById()` |
+| `advancePayout.service.js` | 10% advance payout, idempotent | `runAdvancePayoutJob(userId?)` |
+| `reconciliation.service.js` | Final payout calculation | `bulkReconcile(reconciliations[])` |
+| `withdrawal.service.js` | Withdrawal + 24hr enforcement | `initiateWithdrawal(userId, amount)` |
+| `payoutRecovery.service.js` | Failed payout recovery | `updatePayoutStatus(transactionId, status)` |
+| `user.service.js` | User + wallet reads | `getUserById(id)` |
+
+Each service is a pure function module with no shared mutable state between calls — every method takes its inputs explicitly and returns a plain result object, which is what makes them independently unit-testable (see `tests/`).
+
+## Edge Cases & Failure Scenarios Handled
+
+| # | Scenario | Behavior |
+|---|---|---|
+| 1 | Advance payout job runs twice (sequentially or concurrently) on the same sale | Second run is a no-op — row lock + `advancePaid` flag prevent double payment |
+| 2 | Sale is reconciled twice | Second call is skipped with `reason: "Already reconciled"`; status is never overwritten |
+| 3 | Approved sale that never received an advance | Final payout = full earning (nothing to deduct) |
+| 4 | Rejected sale that never received an advance | Adjustment = `0`, not negative (nothing to claw back) |
+| 5 | Bulk reconciliation includes one invalid/non-existent `saleId` | That entry is reported as `skipped`; the rest of the batch still processes |
+| 6 | User attempts a second withdrawal within 24 hours | Rejected with `429` and remaining cooldown time |
+| 7 | Withdrawal amount exceeds wallet balance | Rejected with `400`, wallet untouched |
+| 8 | Two concurrent withdrawal requests for the same user | Row lock ensures exactly one succeeds; the other fails cleanly |
+| 9 | A withdrawal is later marked `FAILED` / `CANCELLED` / `REJECTED` | Amount is recredited to the wallet and the 24hr cooldown is reset |
+| 10 | A payout is marked `FAILED` twice (duplicate webhook) | Second call is a no-op — funds are recredited only once |
+| 11 | Attempting to update a non-`WITHDRAWAL` transaction via the recovery endpoint | Rejected with `400` — only withdrawal transactions can be recovered this way |
+| 12 | Invalid request payloads (negative earnings, malformed UUIDs, invalid status enums) | Rejected with `400` and field-level Zod validation errors |
+
+All 12 scenarios above have a corresponding automated test in `tests/`.
 
 ## Core Design Decisions
 
