@@ -9,8 +9,42 @@ A Low-Level Design (LLD) implementation of a payout management system for affili
 - **ORM:** Prisma
 - **Validation:** Zod
 - **Testing:** Jest + isolated test database
-
+  
 ## Architecture
+
+```mermaid
+flowchart TB
+  Client(["Client / curl / Postman"])
+
+  subgraph API["Express App"]
+    direction TB
+    Routes["Routes<br/>sale.routes.js, withdrawal.routes.js, ..."]
+    Validators["Validators (Zod)<br/>schema shape checks"]
+    Controllers["Controllers<br/>req/res only"]
+    Services["Services<br/>business logic + DB transactions"]
+    ErrorHandler["Error Handler<br/>centralized JSON errors"]
+  end
+
+  DB[("PostgreSQL<br/>via Prisma")]
+
+  Client -->|HTTP request| Routes
+  Routes --> Validators
+  Validators -->|parsed input| Controllers
+  Controllers --> Services
+  Services -->|"Prisma $transaction + row locking"| DB
+  DB -->|data| Services
+  Services --> Controllers
+  Controllers -->|JSON response| Client
+  Validators -.->|ZodError| ErrorHandler
+  Services -.->|thrown error| ErrorHandler
+  ErrorHandler -.->|formatted error| Client
+```
+
+**Layered design rationale:** Controllers stay thin (HTTP concerns only), services own all business logic and are fully reusable/testable without an HTTP layer, and validators keep input-shape checks separate from business rules. Every error — validation or business-logic — funnels through one centralized handler for consistent JSON responses.
+
+### Folder structure
+
+```
 src/
 ├── config/         # DB connection (Prisma singleton), constants
 ├── controllers/     # HTTP layer — request/response only
@@ -18,6 +52,7 @@ src/
 ├── validators/       # Zod schemas for request validation
 ├── routes/           # Express route definitions
 └── middlewares/       # Centralized error handling
+```
 
 **Layered design rationale:** Controllers stay thin (HTTP concerns only), services own all business logic and are fully reusable/testable without an HTTP layer, and validators keep input-shape checks separate from business rules.
 
