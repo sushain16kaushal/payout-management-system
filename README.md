@@ -58,6 +58,43 @@ src/
 
 ## Database Schema
 
+```mermaid
+erDiagram
+  USER ||--o{ SALE : has
+  USER ||--o{ PAYOUT_TRANSACTION : has
+  BRAND ||--o{ SALE : has
+  SALE ||--o{ PAYOUT_TRANSACTION : generates
+  USER {
+    uuid id PK
+    string email
+    decimal walletBalance
+    datetime lastWithdrawalAt
+  }
+  BRAND {
+    uuid id PK
+    string name
+  }
+  SALE {
+    uuid id PK
+    uuid userId FK
+    uuid brandId FK
+    decimal earning
+    enum status
+    boolean advancePaid
+    decimal advanceAmount
+  }
+  PAYOUT_TRANSACTION {
+    uuid id PK
+    uuid userId FK
+    uuid saleId FK
+    enum type
+    decimal amount
+    enum status
+  }
+```
+
+## Database Schema
+
 4 core entities: `User`, `Brand`, `Sale`, `PayoutTransaction`.
 
 - **Sale → PayoutTransaction** is one-to-many: every advance payout and every final reconciliation adjustment is recorded as an immutable transaction row, giving a full audit trail of how a user's wallet balance was derived.
