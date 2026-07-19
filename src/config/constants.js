@@ -1,0 +1,1 @@
+export const ADVANCE_PAYOUT_PERCENTAGE = 0.10; // 10%
